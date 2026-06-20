@@ -1,47 +1,155 @@
-# PyTorch SimCLR: A Simple Framework for Contrastive Learning of Visual Representations
-[![DOI](https://zenodo.org/badge/241184407.svg)](https://zenodo.org/badge/latestdoi/241184407)
+# SimCLR — Firefighting Device Detection
 
+Self-supervised contrastive learning (SimCLR) applied to CAD firefighting system diagrams.
 
-### Blog post with full documentation: [Exploring SimCLR: A Simple Framework for Contrastive Learning of Visual Representations](https://sthalles.github.io/simple-self-supervised-learning/)
+## Environment Setup
 
-![Image of SimCLR Arch](https://sthalles.github.io/assets/contrastive-self-supervised/cover.png)
-
-### See also [PyTorch Implementation for BYOL - Bootstrap Your Own Latent: A New Approach to Self-Supervised Learning](https://github.com/sthalles/PyTorch-BYOL).
-
-## Installation
-
-```
-$ conda env create --name simclr --file env.yml
-$ conda activate simclr
-$ python run.py
+```bash
+conda env create -f env.yml
+conda activate simclr
 ```
 
-## Config file
+**Requirements** (managed by `env.yml`):
+- Python 3.10
+- torch 2.11.0+cu128 / torchvision 0.26.0+cu128 (CUDA 12.8, supports Blackwell sm_120)
+- scikit-learn, tensorboard, tqdm, pyyaml, pillow, opencv-python-headless
 
-Before running SimCLR, make sure you choose the correct running configurations. You can change the running configurations by passing keyword arguments to the ```run.py``` file.
+> GPU note: requires NVIDIA driver ≥ 520 (tested on RTX PRO 6000 Blackwell, CUDA 13.0)
 
-```python
+---
 
-$ python run.py -data ./datasets --dataset-name stl10 --log-every-n-steps 100 --epochs 100 
+## Dataset
+
+YOLO-format dataset with **41 classes** of firefighting device symbols extracted from CAD system diagrams.
 
 ```
+Firefighting/
+├── train/images/   (102 images)
+├── train/labels/
+├── valid/images/
+└── test/images/
+```
 
-If you want to run it on CPU (for debugging purposes) use the ```--disable-cuda``` option.
+Images are screenshots of AutoCAD fire-alarm/suppression schematic drawings. Labels are YOLO bounding boxes for each device symbol.
 
-For 16-bit precision GPU training, there **NO** need to to install [NVIDIA apex](https://github.com/NVIDIA/apex). Just use the ```--fp16_precision``` flag and this implementation will use [Pytorch built in AMP training](https://pytorch.org/docs/stable/notes/amp_examples.html).
+---
 
-## Feature Evaluation
+## Training
 
-Feature evaluation is done using a linear model protocol. 
+```bash
+cd SimCLR
+conda activate simclr
+python run.py
+```
 
-First, we learned features using SimCLR on the ```STL10 unsupervised``` set. Then, we train a linear classifier on top of the frozen features from SimCLR. The linear model is trained on features extracted from the ```STL10 train``` set and evaluated on the ```STL10 test``` set. 
+Key arguments:
 
-Check the [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/sthalles/SimCLR/blob/simclr-refactor/feature_eval/mini_batch_logistic_regression_evaluator.ipynb) notebook for reproducibility.
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `-data` | `/mnt/whitsett/yilinliu/simclr/Firefighting` | Dataset root |
+| `-dataset-name` | `firefighting` | Dataset (`firefighting` / `stl10` / `cifar10`) |
+| `-a` | `resnet18` | Backbone (`resnet18` / `resnet50`) |
+| `-b` | `32` | Batch size |
+| `--epochs` | `200` | Number of epochs |
+| `--lr` | `3e-4` | Learning rate (Adam) |
+| `--temperature` | `0.07` | NT-Xent softmax temperature |
+| `--out_dim` | `128` | Projection head output dimension |
+| `--gpu-index` | `0` | GPU index |
+| `--fp16-precision` | off | Enable FP16 mixed precision |
 
-Note that SimCLR benefits from **longer training**.
+Example with custom args:
+```bash
+python run.py --epochs 500 -b 64 --temperature 0.05
+```
 
-| Linear Classification      | Dataset | Feature Extractor | Architecture                                                                    | Feature dimensionality | Projection Head dimensionality | Epochs | Top1 % |
-|----------------------------|---------|-------------------|---------------------------------------------------------------------------------|------------------------|--------------------------------|--------|--------|
-| Logistic Regression (Adam) | STL10   | SimCLR            | [ResNet-18](https://drive.google.com/open?id=14_nH2FkyKbt61cieQDiSbBVNP8-gtwgF) | 512                    | 128                            | 100    | 74.45  |
-| Logistic Regression (Adam) | CIFAR10 | SimCLR            | [ResNet-18](https://drive.google.com/open?id=1lc2aoVtrAetGn0PnTkOyFzPCIucOJq7C) | 512                    | 128                            | 100    | 69.82  |
-| Logistic Regression (Adam) | STL10   | SimCLR            | [ResNet-50](https://drive.google.com/open?id=1ByTKAUsdm_X7tLcii6oAEl5qFRqRMZSu) | 2048                   | 128                            | 50     | 70.075 |
+Checkpoints and TensorBoard logs are saved to `runs/<timestamp>/`.
+
+---
+
+## Model Architecture
+
+```
+Input image
+    └─▶ ResNet18 (backbone, pretrained=False)
+            └─▶ MLP Projection Head
+                    Linear(512 → 512) → ReLU → Linear(512 → 128)
+                        └─▶ 128-dim feature vector
+```
+
+Loss: **NT-Xent (InfoNCE)** — for each image, two augmented views are pushed together while all other views in the batch are pushed apart.
+
+---
+
+## Data Augmentation
+
+Applied to each image **twice** (independently) to generate a positive pair:
+
+| # | Transform | Parameters |
+|---|-----------|------------|
+| 1 | `RandomResizedCrop` | size=96 |
+| 2 | `RandomHorizontalFlip` | p=0.5 |
+| 3 | `ColorJitter` (p=0.8) | brightness=0.8, contrast=0.8, saturation=0.8, hue=0.2 |
+| 4 | `RandomGrayscale` | p=0.2 |
+| 5 | `GaussianBlur` | kernel_size=9, σ ∈ [0.1, 2.0] |
+
+> `ColorJitter` hue requires torchvision ≥ 0.19 (fixed overflow bug in `adjust_hue`).
+
+---
+
+## Plotting Results
+
+```bash
+LD_LIBRARY_PATH=/mnt/whitsett/yilinliu/miniconda3/envs/simclr/lib:$LD_LIBRARY_PATH \
+    python plot_results.py
+```
+
+Outputs saved to `plots/`:
+
+| File | Contents |
+|------|----------|
+| `plots/training_curves.png` | NT-Xent loss, Top-1/Top-5 contrastive accuracy, learning rate — all vs. training step |
+| `plots/tsne.png` | t-SNE (2D) of 128-dim features extracted from all training images, colored by dominant device class per image |
+
+> To change the run to plot, edit `RUN_DIR` in `plot_results.py`.
+
+---
+
+## 1-Shot Recognition
+
+Use `one_shot.py` to evaluate the trained backbone in a **1-shot** setting: one randomly chosen crop per symbol class (from the training set) serves as a prototype; every crop in the test set is then classified by cosine similarity to the nearest prototype.
+
+```bash
+python one_shot.py
+```
+
+No arguments needed — paths and checkpoint are set inside the file. The script prints overall accuracy and a per-class breakdown.
+
+**How it works:**
+
+```
+Training images  →  YOLO labels  →  1 random crop per class
+                                         ↓ ResNet18 backbone (frozen, 512-dim)
+                                      prototype gallery
+
+Test images  →  YOLO labels  →  all crops
+                                    ↓ ResNet18 backbone (frozen, 512-dim)
+                                 cosine similarity to each prototype
+                                    ↓
+                                 predicted class
+```
+
+The backbone used is the ResNet18 trained by SimCLR (`runs/Jun20_10-53-45_jason/checkpoint_0200.pth.tar`). Features are extracted **before** the projection head (512-dim), which gives better downstream performance than the 128-dim projected output.
+
+**Baseline result** (seed=42, 40-class, 421 test crops): **42.3% top-1 accuracy** vs. 2.5% random chance.
+
+To change the checkpoint, edit `CKPT_PATH` at the top of `one_shot.py`.
+
+---
+
+## TensorBoard
+
+```bash
+tensorboard --logdir runs/
+```
+
+Logged every 100 steps: `loss`, `acc/top1`, `acc/top5`, `learning_rate`.

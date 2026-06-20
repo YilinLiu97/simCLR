@@ -1,0 +1,21 @@
+# Training outputs
+runs/
+logs_train/
+plots/
+
+# Scripts not for release
+zero_shot.py
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors
+.vscode/
+.idea/
